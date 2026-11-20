@@ -1,0 +1,767 @@
+<?php
+defined('BASEPATH') OR exit('No direct script access allowed');
+
+class Return_order extends PS_Controller
+{
+  public $menu_code = 'ICRTOR';
+	public $menu_group_code = 'IC';
+  public $menu_sub_group_code = 'RECEIVE';
+	public $title = 'คืนสินค้า(ลดหนี้ขาย)';
+  public $segment = 4;
+
+  public function __construct()
+  {
+    parent::__construct();
+    $this->home = base_url().'inventory/return_order';
+    $this->load->model('inventory/return_order_model');
+    $this->load->model('masters/warehouse_model');
+    $this->load->model('masters/zone_model');
+    $this->load->model('masters/customers_model');
+    $this->load->model('masters/products_model');
+    $this->load->helper('warehouse');
+  }
+
+  public function index()
+  {
+    $filter = array(
+      'code' => get_filter('code', 'sm_code', ''),
+      'reference' => get_filter('reference', 'sm_reference', ''),
+      'order_code' => get_filter('order_code', 'sm_order_code', ''),
+      'customer_code' => get_filter('customer_code', 'sm_customer_code', ''),
+      'from_date' => get_filter('from_date', 'sm_from_date', ''),
+      'to_date' => get_filter('to_date', 'sm_to_date', ''),
+      'status' => get_filter('status', 'sm_status', 'all'),
+      'warehouse' => get_filter('warehouse', 'sm_warehouse', 'all'),
+      'zone' => get_filter('zone', 'sm_zone', '')
+    );
+
+    if($this->input->post('search'))
+    {
+      redirect($this->home);
+    }
+    else
+    {
+      //--- แสดงผลกี่รายการต่อหน้า
+      $perpage = get_rows();
+
+      $rows = $this->return_order_model->count_rows($filter);
+      $init	= pagination_config($this->home.'/index/', $rows, $perpage, $this->segment);
+
+      $filter['docs'] = $this->return_order_model->get_list($filter, $perpage, $this->uri->segment($this->segment));
+      $this->pagination->initialize($init);
+      $this->load->view('inventory/return_order/return_order_list', $filter);
+    }
+  }
+
+
+  public function save_as_draft()
+  {
+    $sc = TRUE;
+    $ds = json_decode($this->input->post('data'));
+
+    if( ! empty($ds))
+    {
+      $doc = $this->return_order_model->get($ds->code);
+
+      if( ! empty($doc))
+      {
+        if($doc->status == 'O' OR $doc->status == 'P')
+        {
+          $arr = array(
+            'status' => 'P',
+            'zone_code' => NULL,
+            'zone_name' => NULL,
+            'warehouse_code' => NULL,
+            'warehouse_name' => NULL
+          );
+
+          $zone = empty($ds->zone_code) ? NULL : $this->zone_model->get($ds->zone_code);
+
+          if( ! empty($zone))
+          {
+            if( ! $zone->active)
+            {
+              $sc = FALSE;
+              $this->error = "Cannot save document : {$zone->name} is inactive";
+            }
+
+            $arr = array(
+              'status' => 'P',
+              'zone_code' => $zone->code,
+              'zone_name' => $zone->name,
+              'warehouse_code' => $zone->warehouse_code,
+              'warehouse_name' => $zone->warehouse_name
+            );
+          }
+
+          if($sc === TRUE)
+          {
+            if( ! $this->return_order_model->update($ds->code, $arr))
+            {
+              $sc = FALSE;
+              $this->error = "Failed to update document header";
+            }
+          }
+
+          if($sc === TRUE)
+          {
+            if( ! empty($ds->rows))
+            {
+              $this->db->trans_begin();
+
+              foreach($ds->rows as $row)
+              {
+                if($sc === FALSE) { break; }
+
+                if( ! $this->return_order_model->update_detail($row->id, ['receive_qty' => $row->qty]))
+                {
+                  $sc = FALSE;
+                  $this->error = "Failed to update row";
+                }
+              }
+
+              if($sc === TRUE)
+              {
+                $this->db->trans_commit();
+              }
+              else
+              {
+                $this->db->trans_rollback();
+              }
+            }
+          }
+
+          if($sc === TRUE)
+          {
+            $logs = array(
+              'code' => $doc->code,
+              'action' => 'save darft',
+              'user' => $this->_user->uname
+            );
+
+            $this->return_order_model->add_logs($logs);
+          }
+        }
+        else
+        {
+          $sc = FALSE;
+          set_error('status');
+        }
+      }
+      else
+      {
+        $sc = FALSE;
+        set_error('notfound');
+      }
+    }
+    else
+    {
+      $sc = FALSE;
+      set_error('required');
+    }
+
+    $this->_response($sc);
+  }
+
+
+  public function save()
+  {
+    $sc = TRUE;
+    $ds = json_decode($this->input->post('data'));
+
+    if( ! empty($ds))
+    {
+      $doc = $this->return_order_model->get($ds->code);
+
+      if( ! empty($doc))
+      {
+        $date_add = getConfig('ORDER_SOLD_DATE') == 'D' ? $doc->date_add : now();
+
+        if($doc->status == 'O' OR $doc->status == 'P')
+        {
+          $zone = empty($ds->zone_code) ? NULL : $this->zone_model->get($ds->zone_code);
+
+          if(empty($zone))
+          {
+            $sc = FALSE;
+            $this->error = "Cannot save document : Invalid zone code";
+          }
+
+          if($sc === TRUE && ! $zone->active)
+          {
+            $sc = FALSE;
+            $this->error = "Cannot save document : {$zone->name} is inactive";
+          }
+
+          $arr = array(
+            'status' => 'C',
+            'zone_code' => $zone->code,
+            'zone_name' => $zone->name,
+            'warehouse_code' => $zone->warehouse_code,
+            'warehouse_name' => $zone->warehouse_name,
+            'shipped_date' => $date_add,
+            'update_user' => $this->_user->uname
+          );
+
+          $this->db->trans_begin();
+
+          if($sc === TRUE)
+          {
+            if( ! $this->return_order_model->update($ds->code, $arr))
+            {
+              $sc = FALSE;
+              $this->error = "Failed to update document header";
+            }
+          }
+
+          if($sc === TRUE)
+          {
+            $this->load->model('stock/stock_model');
+            $this->load->model('inventory/movement_model');
+
+            if( ! empty($ds->rows))
+            {
+              foreach($ds->rows as $row)
+              {
+                if($sc === FALSE) { break; }
+
+                $detail = $this->return_order_model->get_detail($row->id);
+
+                if( ! empty($detail))
+                {
+                  if($detail->qty == $row->qty)
+                  {
+                    $arr = array(
+                      'receive_qty' => $row->qty,
+                      'line_status' => 'C'
+                    );
+
+                    if( ! $this->return_order_model->update_detail($row->id, $arr))
+                    {
+                      $sc = FALSE;
+                      $this->error = "Failed to update row";
+                    }
+
+                    if($sc === TRUE)
+                    {
+                      if( ! $this->stock_model->update_stock_zone($zone->code, $row->product_code, $row->qty))
+                      {
+                        $sc = FALSE;
+                        $this->error = "Failed to update stock at line {$row->no} : {$row->product_code}";
+                      }
+                    }
+
+                    if($sc === TRUE)
+                    {
+                      $arr = array(
+                        'reference' => $doc->code,
+                        'warehouse_code' => $zone->warehouse_code,
+                        'zone_code' => $zone->code,
+                        'product_code' => $row->product_code,
+                        'move_in' => $row->qty,
+                        'move_out' => 0,
+                        'date_add' => $date_add
+                      );
+
+                      if( ! $this->movement_model->add($arr))
+                      {
+                        $sc = FALSE;
+                        $this->error = "Failed to save stock movement";
+                      }
+                    }
+                  }
+                  else
+                  {
+                    $sc = FALSE;
+                    $this->error = "Line item return qty and receive qty missmatch at Line {$row->no} : {$row->product_code}";
+                  }
+                }
+                else
+                {
+                  $sc = FALSE;
+                  $this->error = "Line item not found at Line {$row->no} : {$row->product_code}";
+                }
+              }
+            }
+          }
+
+          if($sc === TRUE)
+          {
+            $this->db->trans_commit();
+
+            $logs = array(
+              'code' => $doc->code,
+              'action' => 'Finish',
+              'user' => $this->_user->uname
+            );
+
+            $this->return_order_model->add_logs($logs);
+          }
+          else
+          {
+            $this->db->trans_rollback();
+          }
+
+          if($sc === TRUE && is_true(getConfig('NS_API')))
+          {
+            if(is_true(getConfig('NS_RETURN_INTERFACE')))
+            {
+              $this->load->library('ns_ib_api');
+
+              if( ! $this->ns_ib_api->export_return($doc->code))
+              {
+                $sc = FALSE;
+                $this->error = "บันทึกเอกสารสำเร็จ แต่ส่งข้อมูลไป ERP ไม่สำเร็จ : ERP Error - ".$this->ns_ib_api->error;
+
+                $arr = array(
+                  'is_exported' => 3,
+                  'export_error' => $this->error
+                );
+
+                $this->return_order_model->update($doc->code, $arr);
+              }
+              else
+              {
+                $arr = array(
+                  'is_exported' => 1,
+                  'export_error' => NULL
+                );
+
+                $this->return_order_model->update($doc->code, $arr);
+              }
+            }
+          }
+        }
+        else
+        {
+          $sc = FALSE;
+          set_error('status');
+        }
+      }
+      else
+      {
+        $sc = FALSE;
+        set_error('notfound');
+      }
+    }
+    else
+    {
+      $sc = FALSE;
+      set_error('required');
+    }
+
+    $this->_response($sc);
+  }
+
+
+  public function process($code)
+  {
+    $this->load->helper('discount');
+
+    $doc = $this->return_order_model->get($code);
+
+    if( ! empty($doc))
+    {
+      $details = $this->return_order_model->get_details($code);
+      $barcode_list = array();
+
+      if( ! empty($details))
+      {
+        foreach($details as $rs)
+        {
+          $barcode = $this->products_model->get_barcode($rs->product_code);
+          $barcode = empty($barcode) ? $rs->product_code : $barcode;
+          $rs->barcode = md5($barcode);
+          $rs->bc = $barcode;
+
+          if( empty($barcode_list[$rs->product_code]))
+          {
+            $bc = (object) array(
+              'barcode' => $rs->barcode,
+              'product_code' => $rs->product_code
+            );
+
+            $barcode_list[$rs->product_code] = $bc;
+          }
+        }
+      }
+
+      $ds = array(
+        'doc' => $doc,
+        'details' => $details,
+        'barcode_list' => $barcode_list
+      );
+
+      if($doc->status == 'P')
+      {
+        $arr = array(
+          'status' => 'O'
+        );
+
+        if($this->return_order_model->update($doc->code, $arr))
+        {
+          $doc->status = 'O';
+
+          $logs  = array(
+            'code' => $doc->code,
+            'action' => 'receive',
+            'user' => $this->_user->uname
+          );
+
+          $this->return_order_model->add_logs($logs);
+        }
+      }
+
+      if($doc->status == 'P' OR $doc->status == 'O')
+      {
+        $this->load->view('inventory/return_order/return_order_process', $ds);
+      }
+      else
+      {
+        $this->load->view('inventory/return_order/return_order_view_detail', $ds);
+      }
+    }
+    else
+    {
+      $this->error_page();
+    }
+  }
+
+
+  public function view_detail($code)
+  {
+    $doc = $this->return_order_model->get($code);
+    $details = $this->return_order_model->get_details($code);
+    $ds = array(
+      'doc' => $doc,
+      'details' => $details
+    );
+
+    $this->load->view('inventory/return_order/return_order_view_detail', $ds);
+  }
+
+
+  public function send_to_erp()
+  {
+    $sc = TRUE;
+
+    $code = $this->input->post('code');
+
+    if( ! empty($code))
+    {
+      if(is_true(getConfig('NS_API')))
+      {
+        if(is_true(getConfig('NS_RETURN_INTERFACE')))
+        {
+          $doc = $this->return_order_model->get($code);
+
+          if( ! empty($doc))
+          {
+            if($doc->status == 'C')
+            {
+              $this->load->library('ns_ib_api');
+
+              if( ! $this->ns_ib_api->export_return($code))
+              {
+                $sc = FALSE;
+                $this->error = "Send data failed : ERP Error - ".$this->ns_ib_api->error;
+
+                if($doc->is_exported != 1)
+                {
+                  $arr = array(
+                    'is_exported' => 3,
+                    'export_error' =>  $this->error
+                  );
+
+                  $this->return_order_model->update($code, $arr);
+                }
+              }
+              else
+              {
+                if($doc->is_exported != 1)
+                {
+                  $arr = array(
+                    'is_exported' => 1,
+                    'export_error' => NULL
+                  );
+
+                  $this->return_order_model->update($code, $arr);
+                }
+              }
+            }
+            else
+            {
+              $sc = FALSE;
+              set_error('status');
+            }
+          }
+          else
+          {
+            $sc = FALSE;
+            set_error('notfound');
+          }
+        }
+        else
+        {
+          $sc = FALSE;
+          $this->error = "Return Interface is inactive";
+        }
+      }
+      else
+      {
+        $sc = FALSE;
+        $this->error = "WRX API is inactive";
+      }
+    }
+    else
+    {
+      $sc = FALSE;
+      set_error('required');
+    }
+
+    $this->_response($sc);
+  }
+
+
+  public function get_zone()
+  {
+    $sc = TRUE;
+    $ds = [];
+    $code = $this->input->post('zone_code');
+
+    if( ! empty($code))
+    {
+      $zone = $this->zone_model->get_zone($code);
+
+      if( ! empty($zone))
+      {
+        $ds = array(
+          'code' => $zone->code,
+          'name' => $zone->name,
+          'warehouse_code' => $zone->warehouse_code,
+          'active' => $zone->active
+        );
+      }
+      else
+      {
+        $sc = FALSE;
+        $this->error = "Invalid zone code or not found";
+      }
+    }
+    else
+    {
+      $sc = FALSE;
+      set_error('required');
+    }
+
+    $arr = array(
+      'status' => $sc === TRUE ? 'success' : 'failed',
+      'message' => $sc === TRUE ? 'success' : $this->error,
+      'data' => $sc === TRUE ? $ds : NULL
+    );
+
+    echo json_encode($arr);
+  }
+
+
+	//--- print received
+  public function print_detail($code)
+  {
+    $this->load->library('printer');
+    $doc = $this->return_order_model->get($code);
+    $doc->customer_name = $this->customers_model->get_name($doc->customer_code);
+    $doc->warehouse_name = $this->warehouse_model->get_name($doc->warehouse_code);
+    $doc->zone_name = $this->zone_model->get_name($doc->zone_code);
+    $details = $this->return_order_model->get_details($code);
+
+    if( ! empty($details))
+    {
+      foreach($details as $rs)
+      {
+        $rs->barcode = $this->products_model->get_barcode($rs->product_code);
+      }
+    }
+    $ds = array(
+      'doc' => $doc,
+      'details' => $details
+    );
+
+    $this->load->view('print/print_return', $ds);
+  }
+
+
+  public function cancle_return()
+  {
+    $sc = TRUE;
+    $code = $this->input->post('code');
+    $reason = trim($this->input->post('reason'));
+
+    if($this->pm->can_delete)
+    {
+			$doc = $this->return_order_model->get($code);
+
+			if( ! empty($doc))
+			{
+				if($doc->status != 2)
+				{
+          $this->load->model('stock/stock_model');
+          $this->load->model('inventory/movement_model');
+
+          $details = $this->return_order_model->get_details($code);
+
+          if( ! empty($details))
+          {
+            foreach($details as $rs)
+            {
+              if($sc === FALSE) { break; }
+
+              $stock = $this->stock_model->get_stock_zone($doc->zone_code, $rs->product_code);
+
+              if($stock < $rs->receive_qty)
+              {
+                $sc = FALSE;
+                $this->error = "สต็อกคงเหลือในโซนไม่เพียงพอ";
+              }
+            }
+          }
+
+          if($sc === TRUE)
+          {
+            $this->db->trans_begin();
+
+            if( ! empty($details))
+            {
+              foreach($details as $rs)
+              {
+                if($sc === FALSE) { break; }
+
+                if( ! $this->stock_model->update_stock_zone($doc->zone_code, $rs->product_code, ($rs->receive_qty * -1)))
+                {
+                  $sc = FALSE;
+                  $this->error = "ตัดสต็อกออกจากโซนไม่สำเร็จ";
+                }
+              }
+
+              if($sc === TRUE)
+              {
+                if( ! $this->movement_model->drop_movement($doc->code))
+                {
+                  $sc = FALSE;
+                  $this->error = "ลบ movement ไม่สำเร็จ";
+                }
+              }
+            }
+
+            if($sc === TRUE)
+            {
+              //--- set details to cancle
+              if( ! $this->return_order_model->update_details($code, array('is_cancle' => 1)))
+              {
+                $sc = FALSE;
+                $this->error = "เปลี่ยนสถานะรายการไม่สำเร็จ";
+              }
+            }
+
+            if($sc === TRUE)
+            {
+              $arr = array(
+                'status' => 2,
+                'is_approve' => 0,
+                'approver' => NULL,
+                'is_complete' => 0,
+                'cancle_date' => now(),
+                'cancle_reason' => $reason,
+                'cancle_user' => $this->_user->uname
+              );
+
+              if( ! $this->return_order_model->update($doc->code, $arr))
+              {
+                $sc = FALSE;
+                $this->error = "Failed to update document status";
+              }
+            }
+
+            if($sc === TRUE)
+            {
+              $this->db->trans_commit();
+            }
+            else
+            {
+              $this->db->trans_rollback();
+            }
+          }
+				}
+			}
+			else
+			{
+				$sc = FALSE;
+				set_error('status');
+			}
+    }
+    else
+    {
+      $sc = FALSE;
+      set_error('permission');
+    }
+
+    $this->_response($sc);
+  }
+
+
+  public function get_item()
+  {
+    if($this->input->post('barcode'))
+    {
+      $barcode = trim($this->input->post('barcode'));
+      $item = $this->products_model->get_product_by_barcode($barcode);
+      if( ! empty($item))
+      {
+        echo json_encode($item);
+      }
+      else
+      {
+        echo 'not-found';
+      }
+    }
+  }
+
+
+  public function get_new_code($date)
+  {
+    $date = $date == '' ? date('Y-m-d') : $date;
+    $Y = date('y', strtotime($date));
+    $M = date('m', strtotime($date));
+    $prefix = getConfig('PREFIX_RETURN_ORDER');
+    $run_digit = getConfig('RUN_DIGIT_RETURN_ORDER');
+    $pre = $prefix .'-'.$Y.$M;
+    $code = $this->return_order_model->get_max_code($pre);
+    if(! is_null($code))
+    {
+      $run_no = mb_substr($code, ($run_digit*-1), NULL, 'UTF-8') + 1;
+      $new_code = $prefix . '-' . $Y . $M . sprintf('%0'.$run_digit.'d', $run_no);
+    }
+    else
+    {
+      $new_code = $prefix . '-' . $Y . $M . sprintf('%0'.$run_digit.'d', '001');
+    }
+
+    return $new_code;
+  }
+
+
+  public function clear_filter()
+  {
+    $filter = array(
+      'sm_code',
+      'sm_reference',
+      'sm_customer_code',
+      'sm_from_date',
+      'sm_to_date',
+      'sm_status',
+			'sm_warehouse',
+      'sm_zone'
+    );
+    clear_filter($filter);
+  }
+} //--- end class
+?>

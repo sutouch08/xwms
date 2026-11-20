@@ -1,0 +1,65 @@
+<?php
+defined('BASEPATH') or exit('No direct script access allowed');
+$config['ns_base_url'] = 'https://9724922-sb2.restlets.api.netsuite.com/app/site/hosting/restlet.nl';
+$config['ns_account_id'] = '9724922_SB2'; 
+$config['ns_token_url'] = 'https://9724922-sb2.suitetalk.api.netsuite.com/services/rest/auth/oauth2/v1/token';
+$config['ns_client_id'] = 'f27f954b91110b34da61a138467433ed81d8c79e24b5afc3882f57331cfb803a';
+$config['ns_certificate_id'] = 'KD2mJdEHdwYExnB8IEv_eAe7QJSly0vyCv6RlaWe6C4';
+$config['ns_alg'] = 'PS256';
+$config['ns_scope'] = 'restlets';
+$config['ns_token_ttl'] = 3600; // seconds
+$config['ns_private_key_pem'] = <<<PEM
+-----BEGIN PRIVATE KEY-----
+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
+ow1S2zCaxLebTgfmAqRLR0GNdbT8Sw==
+-----END PRIVATE KEY-----
+PEM;
+
